@@ -1,0 +1,15 @@
+# SoC build output
+soc/build/
+
+# Firmware build artifacts
+firmware/*.o
+firmware/*.elf
+firmware/*.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Simulation output
+soc/*.vcd
