@@ -70,8 +70,8 @@ def main():
     sock.settimeout(TIMEOUT)
 
     print(f"Sending to {FPGA_IP}:{FPGA_PORT}")
-    print(f"{'Size (B)':>10}  {'Min (us)':>10}  {'Mean (us)':>10}  {'Max (us)':>10}  {'Stdev':>8}")
-    print("-" * 58)
+    print(f"{'Size (B)':>10}  {'Min (us)':>10}  {'Mean (us)':>10}  {'Max (us)':>10}  {'Stdev':>8}  {'Mbps':>8}")
+    print("-" * 70)
 
     means   = []
     mins    = []
@@ -85,12 +85,14 @@ def main():
             print(f"{size:>10}  no replies")
             continue
 
-        mn  = min(rtts)
-        mx  = max(rtts)
-        avg = statistics.mean(rtts)
-        sd  = statistics.stdev(rtts) if len(rtts) > 1 else 0.0
+        mn   = min(rtts)
+        mx   = max(rtts)
+        avg  = statistics.mean(rtts)
+        sd   = statistics.stdev(rtts) if len(rtts) > 1 else 0.0
+        # One-way effective throughput: payload crosses the link twice per RTT.
+        mbps = (size * 8) / (avg * 1e-6) / 1e6
 
-        print(f"{size:>10}  {mn:>10.1f}  {avg:>10.1f}  {mx:>10.1f}  {sd:>8.1f}")
+        print(f"{size:>10}  {mn:>10.1f}  {avg:>10.1f}  {mx:>10.1f}  {sd:>8.1f}  {mbps:>8.3f}")
 
         valid_sizes.append(size)
         means.append(avg)
