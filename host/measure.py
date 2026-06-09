@@ -47,10 +47,15 @@ def measure_rtt(sock, payload_size, samples, warmup):
         t0 = time.perf_counter()
         sock.sendto(payload, (FPGA_IP, FPGA_PORT))
         try:
-            data, _ = sock.recvfrom(4096)
+            data, addr = sock.recvfrom(4096)
             t1 = time.perf_counter()
         except socket.timeout:
             print(f"  timeout at size={payload_size} sample={i}")
+            continue
+
+        if data != payload:
+            print(f"  PAYLOAD MISMATCH at size={payload_size} sample={i} "
+                  f"(got {len(data)} bytes from {addr})")
             continue
 
         if i >= warmup:
