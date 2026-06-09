@@ -17,6 +17,7 @@
  * Load:  litex_term --kernel firmware.bin /dev/ttyUSB0
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -67,10 +68,10 @@ static inline unsigned int slave_read(unsigned int offset)
  * Step 3 is the critical discipline: the outgoing bytes come from the slave,
  * never from the incoming pointer. That is what puts the slave in the path.
  */
-static void echo_rx(unsigned int src_ip,
-                    unsigned short src_port,
-                    unsigned short dst_port,
-                    void *data, unsigned int length)
+static void echo_rx(uint32_t src_ip,
+                    uint16_t src_port,
+                    uint16_t dst_port,
+                    void *data, uint32_t length)
 {
     if (dst_port != ECHO_PORT)
         return;
