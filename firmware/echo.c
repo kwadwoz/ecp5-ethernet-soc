@@ -27,7 +27,7 @@
 #include <libliteeth/udp.h>  /* udp_start / udp_service / udp_send etc.  */
 
 /* FPGA's network identity. The host sends packets to this MAC and IP. */
-static const unsigned char fpga_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+static const unsigned char fpga_mac[6] = {0x14, 0x4f, 0xd7, 0xcb, 0x16, 0xff};
 static const unsigned int  fpga_ip     = IPTOINT(192, 168, 1, 101);
 
 /* UDP port the echo listens on. */
