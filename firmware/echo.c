@@ -17,6 +17,7 @@
  * Load:  litex_term --kernel firmware.bin /dev/ttyUSB0
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -56,21 +57,34 @@ static inline unsigned int slave_read(unsigned int offset)
 }
 
 /*
+ * Pending reply state.
+ *
+ * udp_send() sends to cached_ip/cached_mac in udp.c, which is only populated
+ * by udp_arp_resolve(). The cache is never updated from incoming packets, so
+ * calling udp_send() directly from the RX callback silently fails (returns 0).
+ * udp_arp_resolve() internally calls udp_service(), which would re-enter the
+ * callback while the current frame is still being processed.
+ *
+ * Solution: the callback saves the reply parameters and returns immediately.
+ * The main loop calls udp_arp_resolve() + udp_send() safely between frames.
+ */
+static volatile uint32_t pending_src_ip;
+static volatile uint16_t pending_src_port;
+static volatile uint16_t pending_dst_port;
+static volatile uint32_t pending_length;
+static volatile int      pending_reply;
+
+/*
  * echo_rx -- UDP receive callback.
  *
- * The stack calls this for every received packet. We:
- *   1. Drop anything not on ECHO_PORT.
- *   2. Write the payload into the EchoSlave word by word.
- *   3. Read it back OUT OF THE SLAVE into the transmit buffer.
- *   4. Send the reply.
- *
- * Step 3 is the critical discipline: the outgoing bytes come from the slave,
- * never from the incoming pointer. That is what puts the slave in the path.
+ * Writes the payload into the EchoSlave word by word, then signals the main
+ * loop to send the reply. The BRAM holds the data until the main loop reads
+ * it back -- nothing else writes to it in between.
  */
-static void echo_rx(unsigned int src_ip,
-                    unsigned short src_port,
-                    unsigned short dst_port,
-                    void *data, unsigned int length)
+static void echo_rx(uint32_t src_ip,
+                    uint16_t src_port,
+                    uint16_t dst_port,
+                    void *data, uint32_t length)
 {
     if (dst_port != ECHO_PORT)
         return;
@@ -81,25 +95,17 @@ static void echo_rx(unsigned int src_ip,
     unsigned char *in   = (unsigned char *)data;
     unsigned int   words = (length + 3) / 4;
 
-    /* 1. Write received payload into the slave. */
     for (unsigned int i = 0; i < words; i++) {
         unsigned int w = 0;
         memcpy(&w, in + i * 4, 4);
         slave_write(i, w);
     }
 
-    /* 2. Read back from the slave into the UDP transmit buffer. */
-    unsigned char *out = (unsigned char *)udp_get_tx_buffer();
-    for (unsigned int i = 0; i < words; i++) {
-        unsigned int w = slave_read(i);
-        memcpy(out + i * 4, &w, 4);
-    }
-
-    /* 3. Send the reply back to whoever sent this packet. */
-    udp_send(dst_port, src_port, length);
-
-    /* D9 on: reply sent */
-    debug_leds_out_write(debug_leds_out_read() | 0x08);
+    pending_src_ip   = src_ip;
+    pending_src_port = src_port;
+    pending_dst_port = dst_port;
+    pending_length   = length;
+    pending_reply    = 1;
 }
 
 int main(void)
@@ -118,12 +124,33 @@ int main(void)
     /* D7 on: udp_start() returned -- PHY linked and MAC initialized */
     debug_leds_out_write(0x03);
 
+    pending_reply = 0;
     udp_set_callback(echo_rx);
 
-    /* printf removed -- UART may block before udp_service() is reached */
-
-    while (1)
+    while (1) {
         udp_service();
+
+        if (pending_reply) {
+            pending_reply = 0;
+
+            /* Resolve the sender's MAC (fast path if already cached). */
+            if (!udp_arp_resolve(pending_src_ip))
+                continue;
+
+            /* Read payload back from the slave into the TX buffer. */
+            unsigned char *out   = (unsigned char *)udp_get_tx_buffer();
+            unsigned int   words = (pending_length + 3) / 4;
+            for (unsigned int i = 0; i < words; i++) {
+                unsigned int w = slave_read(i);
+                memcpy(out + i * 4, &w, 4);
+            }
+
+            udp_send(pending_dst_port, pending_src_port, pending_length);
+
+            /* D9 on: reply sent */
+            debug_leds_out_write(debug_leds_out_read() | 0x08);
+        }
+    }
 
     return 0;
 }

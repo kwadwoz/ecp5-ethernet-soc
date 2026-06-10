@@ -1,6 +1,6 @@
 # ecp5-ethernet-soc
 
-A UDP echo SoC for the Lattice ECP5 Evaluation Board. The host sends UDP packets to the FPGA over Ethernet, the FPGA writes each payload into a hardware BRAM (EchoSlave), reads it back, and echoes it to the host. The host measures round-trip latency across a range of payload sizes.
+A UDP echo SoC for the Lattice ECP5 Evaluation Board. The host sends UDP packets to the FPGA over Ethernet; the FPGA writes each payload into a hardware BRAM (EchoSlave), reads it back, and echoes it to the host. The host measures round-trip latency and throughput across a range of payload sizes.
 
 This is the prototype node for a 10-node cloud FPGA cluster.
 
@@ -21,7 +21,7 @@ firmware/
   Makefile             Cross-compiles firmware_rom.bin (baked into bitstream)
 
 host/
-  measure.py           Sends UDP packets of increasing size, measures RTT, plots results
+  measure.py           Sends UDP packets of increasing size, measures RTT and Mbps, plots results
 ```
 
 ---
@@ -32,24 +32,24 @@ host/
 |------|------|
 | FPGA board | Lattice ECP5 Evaluation Board (LFE5UM5G-85F-8BG381) |
 | Ethernet PHY | Waveshare LAN8720 ETH Board (HW-156) |
-| Host Ethernet | USB Ethernet dongle (appears as `en5` on macOS) |
+| Host Ethernet | USB-to-Ethernet adapter (appears as `en12` on macOS — check with `ifconfig -l`) |
 | Programming cable | Mini USB cable to the board's FTDI port |
 
 ### LAN8720 to J40 Wiring
 
-| LAN8720 Label | J40 Pin | Signal |
-|---------------|---------|--------|
-| nINT/RETCLK | 1 | REFCLK (50 MHz from FPGA) |
-| TX0 | 4 | TXD0 |
-| TX1 | 5 | TXD1 |
-| TX_EN | 6 | TXEN |
-| RX0 | 7 | RXD0 |
-| RX1 | 8 | RXD1 |
-| CRS | 9 | CRS_DV |
-| MDIO | 10 | MDIO |
-| MDC | 11 | MDC |
-| GND | 19 | GND |
-| VCC | 20 | 3.3V (EXPCON_3V3) |
+| LAN8720 Label | ECP5 Ball | Signal | Direction |
+|---------------|-----------|--------|-----------|
+| nINT/RETCLK | J4 | REFCLK | Input to FPGA (PHY drives 50 MHz) |
+| TX0 | K2 | TXD0 | Output from FPGA |
+| TX1 | M5 | TXD1 | Output from FPGA |
+| TX_EN | J5 | TXEN | Output from FPGA |
+| RX0 | G1 | RXD0 | Input to FPGA |
+| RX1 | N5 | RXD1 | Input to FPGA |
+| CRS | L5 | CRS_DV | Input to FPGA |
+| MDIO | L4 | MDIO | Bidirectional |
+| MDC | K4 | MDC | Output from FPGA |
+| GND | J40 pin 19 | GND | |
+| VCC | J40 pin 20 | 3.3V (EXPCON_3V3) | |
 
 nRST is not exposed on the LAN8720 ETH Board header -- it is pulled high internally.
 
@@ -57,31 +57,53 @@ The mini USB programming cable must remain connected during operation: the board
 
 ---
 
+## Network Addresses
+
+| Device | IP | MAC |
+|--------|----|-----|
+| Host (USB dongle) | 192.168.1.1 | assigned by OS (check with `ifconfig en12`) |
+| FPGA | 192.168.1.101 | `02:00:00:00:00:01` |
+
+The FPGA MAC is a locally-administered unicast address (`02:xx`). Do not reuse the USB dongle's MAC for the FPGA — if both ends of the cable share the same MAC, ARP replies are silently discarded by the OS and the connection will never work.
+
+In the full 10-node cluster, FPGAs are numbered 192.168.1.101–192.168.1.110 with MACs `02:00:00:00:00:01`–`02:00:00:00:00:0a`.
+
+---
+
 ## Dependencies
 
-### Python packages (install into your conda environment)
+### Conda environment
+
+All Python work runs in a dedicated conda environment:
 
 ```sh
-pip install amaranth
-pip install litex
-pip install liteeth
-pip install matplotlib
+conda create -n litex-ecp5 python=3.11
+conda activate litex-ecp5
 ```
 
-LiteX also requires Migen, which is installed automatically as a dependency.
+### LiteX ecosystem
 
-To install the full LiteX ecosystem (recommended):
-
-```sh
-pip install litex liteeth litedram litepcie
-```
-
-Or use the official LiteX setup script:
+Install LiteX into a persistent directory so it survives reboots (never install into `/tmp`):
 
 ```sh
-wget https://raw.githubusercontent.com/enjoy-digital/litex/master/litex_setup.py
+mkdir -p ~/litex-src && cd ~/litex-src
+curl -O https://raw.githubusercontent.com/enjoy-digital/litex/master/litex_setup.py
 python litex_setup.py --init --install
 ```
+
+To update later:
+
+```sh
+cd ~/litex-src && python litex_setup.py --update
+```
+
+Also install Amaranth and Matplotlib:
+
+```sh
+pip install amaranth matplotlib
+```
+
+**Important:** always activate the conda environment with `conda activate litex-ecp5` before running build scripts. Do not use `conda run -n litex-ecp5 python ...` — it skips activation scripts and editable installs (`pip install -e`) will not be found.
 
 ### FPGA toolchain
 
@@ -110,6 +132,8 @@ make -j$(nproc)
 sudo make install
 ```
 
+Alternatively, all of these (Yosys, nextpnr, ecppack, openFPGALoader) are bundled in [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build).
+
 ### RISC-V cross-compiler
 
 The firmware targets RV32IM. You need a bare-metal RISC-V GCC toolchain.
@@ -127,29 +151,36 @@ Or download a prebuilt toolchain from [SiFive](https://github.com/sifive/freedom
 
 ## Build
 
-### 1. Build the SoC and firmware
+### 1. Activate the environment
 
-From the repo root:
+```sh
+conda activate litex-ecp5
+```
+
+### 2. Build the SoC and firmware
 
 ```sh
 cd soc && python build_soc.py
 ```
 
 This runs four steps automatically:
-1. Exports `echo_slave.py` (Amaranth) to `build/gateware/echo_slave.v` via Yosys
-2. Generates CSR headers (`build/software/include/generated/`)
+
+1. Exports `echo_slave.py` (Amaranth HDL) to `echo_slave.v` via Yosys
+2. Generates CSR headers and builds LiteX libraries
 3. Compiles `firmware/firmware_rom.bin` with the RISC-V cross-compiler
 4. Runs Yosys + nextpnr-ecp5 + ecppack with the firmware baked into ROM
 
-Output: `soc/build/gateware/ecp5_ethernet_soc.bit`
+Output: `/tmp/ecp5-soc-build/gateware/ecp5_ethernet_soc.bit`
 
-### 2. Program the FPGA
+Note: the build directory is `/tmp/ecp5-soc-build/` and will be wiped on reboot. Re-running `build_soc.py` regenerates it.
+
+### 3. Program the FPGA
 
 ```sh
-openFPGALoader -b ecpix5 soc/build/gateware/ecp5_ethernet_soc.bit
+openFPGALoader -b ecpix5 /tmp/ecp5-soc-build/gateware/ecp5_ethernet_soc.bit
 ```
 
-### 3. Verify boot via LEDs
+### 4. Verify boot via LEDs
 
 | LED | Meaning |
 |-----|---------|
@@ -159,41 +190,125 @@ openFPGALoader -b ecpix5 soc/build/gateware/ecp5_ethernet_soc.bit
 | D8 on | UDP packet received on port 1234 |
 | D9 on | Echo reply sent |
 
-D5 blinking and D6+D7 on is the expected idle state. D8 and D9 light when the host sends traffic.
+D5 blinking with D6+D7 on is the expected idle state. D8 and D9 light up when the host sends traffic.
+
+---
+
+## Network Setup (macOS)
+
+These steps reset on reboot and must be re-run each session.
+
+### Step 1 — Find your USB Ethernet interface
+
+```sh
+ifconfig -l
+```
+
+Look for the interface that corresponds to your USB-to-Ethernet adapter. You can also use:
+
+```sh
+networksetup -listallhardwareports
+```
+
+This prints each hardware port alongside its interface name (e.g., `en12`). Confirm it is active:
+
+```sh
+ifconfig en12
+```
+
+You should see `status: active`. If it shows `status: inactive`, the cable is not plugged in or the FPGA is not powered.
+
+### Step 2 — Assign a static IP to the interface
+
+```sh
+sudo ifconfig en12 192.168.1.1 netmask 255.255.255.0
+```
+
+Verify:
+
+```sh
+ifconfig en12 | grep inet
+```
+
+You should see `inet 192.168.1.1`. If you still see `169.254.x.x` (APIPA/link-local), the command did not take — re-run it.
+
+### Step 3 — Add a static ARP entry for the FPGA
+
+The FPGA uses MAC `02:00:00:00:00:01`. Adding this entry bypasses ARP resolution and ensures packets are directed to the FPGA immediately:
+
+```sh
+sudo arp -s 192.168.1.101 02:00:00:00:00:01
+```
+
+### Step 4 — Verify the ARP table
+
+```sh
+arp -a | grep 192.168.1
+```
+
+Expected output:
+
+```
+? (192.168.1.101) at 2:0:0:0:0:1 on en12 permanent [ethernet]
+```
+
+If the entry shows `(incomplete)`, the FPGA is not responding to ARP. Check that the bitstream is loaded, the PHY cable is connected, and the FTDI USB cable is plugged in.
+
+### Step 5 — Test connectivity with ping
+
+```sh
+ping 192.168.1.101
+```
+
+Expected: replies with ~1–3 ms RTT. The FPGA firmware handles ICMP echo natively.
+
+If ping fails:
+- Confirm D6 and D7 are lit on the board (firmware running, PHY linked)
+- Confirm `ifconfig en12` shows `inet 192.168.1.1` and `status: active`
+- Confirm the ARP entry is present and not `(incomplete)`
+- Try reprogramming the FPGA
+
+### Step 6 — Check what is actually on the wire (optional)
+
+```sh
+sudo tcpdump -i en12 -n -e 'udp port 1234 or icmp'
+```
+
+The `-e` flag shows Ethernet MAC addresses. You should see frames going to `02:00:00:00:00:01` (FPGA) and replies coming from `02:00:00:00:00:01`. If the destination MAC is different, traffic is being routed to the wrong device.
 
 ---
 
 ## Running the Host
 
-### Network setup (macOS, run once per reboot)
-
-The FPGA-facing USB Ethernet dongle must be on the same subnet as the FPGA. The FPGA is hardcoded to `192.168.1.101`. Configure the dongle interface (typically `en5`) to `192.168.1.10`.
-
-If your home network is also on `192.168.1.x`, macOS will route FPGA traffic out the wrong interface. Force it with a static route and ARP entry:
-
 ```sh
-sudo route add -host 192.168.1.101 -interface en5
-sudo arp -s 192.168.1.101 02:00:00:00:00:01
-```
-
-### Run the latency sweep
-
-```sh
+conda activate litex-ecp5
 python host/measure.py
 ```
 
-This sweeps UDP payload sizes from 8 to 1400 bytes, measures 20 round-trips per size, and saves a latency plot to `host/latency.png`.
+This sweeps UDP payload sizes from 8 to 1400 bytes, measures 20 round-trips per size, prints a latency and throughput table, and saves a plot to `host/latency.png`.
 
----
+The script also verifies that each reply payload matches what was sent. A `PAYLOAD MISMATCH` message means data was corrupted in transit or you are receiving replies from a different device.
 
-## Network Addresses
+Example output (10baseT link, USB-to-Ethernet adapter):
 
-| Device | IP | MAC |
-|--------|----|-----|
-| Host (USB dongle) | 192.168.1.10 | assigned by OS |
-| FPGA 1 | 192.168.1.101 | 02:00:00:00:00:01 |
+```
+Sending to 192.168.1.101:1234
+  Size (B)    Min (us)   Mean (us)    Max (us)     Stdev      Mbps
+----------------------------------------------------------------------
+         8       728.2      1004.3      1492.0     204.7     0.064
+        16       627.9       764.5      1042.0     116.2     0.167
+        32       753.8       990.9      1384.5     159.9     0.258
+        64       851.9      1096.6      1405.6     117.2     0.467
+       128       903.7      1006.6      1127.6      72.7     1.017
+       256       592.9       638.5       709.1      39.0     3.207
+       512       587.7       616.8       732.2      33.7     6.641
+       768       589.2       627.1       701.5      32.3     9.797
+      1024       635.7       796.7      1088.5     133.2    10.282
+      1280       760.8       874.1      1098.7      84.2    11.714
+      1400      2594.6      2722.6      2853.7      76.6     4.114
+```
 
-In the full 10-node cluster, FPGAs are numbered 192.168.1.101 through 192.168.1.110 with MACs 02:00:00:00:00:01 through 02:00:00:00:00:0a.
+The Mbps column is `payload_bytes * 8 / mean_RTT` — effective one-way throughput. The ~600 µs latency floor is dominated by the USB adapter polling interval, not the FPGA. The 1400-byte spike is a known USB adapter behavior near the full Ethernet frame size.
 
 ---
 
@@ -201,7 +316,7 @@ In the full 10-node cluster, FPGAs are numbered 192.168.1.101 through 192.168.1.
 
 | Address | Size | Region |
 |---------|------|--------|
-| 0x00000000 | 64 KB | ROM (firmware baked in) |
+| 0x00000000 | 64 KB | ROM (firmware baked in at build time) |
 | 0x10000000 | 16 KB | SRAM (stack and heap) |
 | 0x90000000 | 2 KB | EchoSlave BRAM (512 x 32-bit) |
 | 0xB0000000 | 4 KB | LiteEth MAC RX SRAM |
@@ -209,9 +324,30 @@ In the full 10-node cluster, FPGAs are numbered 192.168.1.101 through 192.168.1.
 
 ---
 
+## Firmware Notes
+
+### ARP cache and the deferred-reply pattern
+
+`libliteeth`'s `udp_send()` sends to a single cached `(ip, mac)` pair that is only populated by explicitly calling `udp_arp_resolve()`. It is never updated from incoming packets. Calling `udp_arp_resolve()` from inside the receive callback causes re-entrancy: the ARP resolve polls `udp_service()` internally while `udp_service()` is still processing the current frame, which re-enters the callback.
+
+The fix is a deferred-reply pattern: the callback writes the payload into the EchoSlave BRAM and saves the reply parameters, then returns. The main loop calls `udp_arp_resolve()` and `udp_send()` safely between frames.
+
+### MAC address
+
+The FPGA MAC is hardcoded in `firmware/echo.c`:
+
+```c
+static const unsigned char fpga_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+```
+
+The `02` prefix marks it as locally administered and unicast. Never set this to the same MAC as the host-side USB Ethernet adapter — the OS will discard ARP replies that appear to originate from its own MAC.
+
+---
+
 ## Running the Simulation
 
 ```sh
+conda activate litex-ecp5
 cd soc && python test_echo_slave.py
 ```
 

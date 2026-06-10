@@ -8,22 +8,21 @@ Steps:
   3. Runs yosys + nextpnr-ecp5 + ecppack and writes a bitstream.
 
 Board:  LFE5UM5G-85F-EVN  (device LFE5UM5G-85F-8BG381)
-PHY:    Waveshare LAN8720 wired to J40  (Bank 6, LVCMOS33, 3.3V default)
-Clock:  12 MHz FTDI oscillator at ball A10 -> ECP5 PLL -> 50 MHz sys + eth
+PHY:    LAN8720A breakout
+Clock:  12 MHz FTDI oscillator at A10 -> PLL -> 50 MHz cd_sys
+        PHY drives 50 MHz REF_CLK on J4 (GR_PCLK6_0) -> cd_eth
 
-J40 wiring:
-  pin  1  K2   REFCLK   50 MHz output from FPGA to LAN8720
-  pin  4  F1   TXD0
-  pin  5  H2   TXD1
-  pin  6  G1   TXEN
-  pin  7  J4   RXD0
-  pin  8  J5   RXD1
-  pin  9  J3   CRS_DV
-  pin 10  K3   MDIO
-  pin 11  L4   MDC
-  pin 12  L5   nRST
-  pin 19  GND           LAN8720 GND
-  pin 20  EXPCON_3V3    LAN8720 VCC (3.3V)
+Hardware-verified pin assignments (see baseline_tests/FINDINGS.md):
+  J4   REF_CLK  Input  50 MHz from PHY; global-clock-capable (GR_PCLK6_0)
+  L4   MDIO     Bidir  1.5 kΩ pull-up on breakout required
+  K4   MDC      Output SMI clock
+  G1   RXD[0]   Input
+  N5   RXD[1]   Input
+  L5   CRS_DV   Input
+  J5   TXEN     Output
+  K2   TXD[0]   Output
+  M5   TXD[1]   Output
+  nRST not wired; pulled high on breakout board.
 
 Clock note: the 12 MHz clock from FTDI is only present when the USB
 programming cable is plugged into the board. Keep it connected during
@@ -63,19 +62,18 @@ def export_echo_slave(out_dir):
     with open(il_path, "w") as f:
         f.write(convert(dut, ports=dut.ports()))
 
-    subprocess.run(
-        [
-            "yosys", "-q", "-p",
-            (
-                f"read_rtlil {il_path}; "
-                f"hierarchy -check -top top; "
-                f"proc; opt; "
-                f"rename top echo_slave; "
-                f"write_verilog {v_path}"
-            ),
-        ],
-        check=True,
-    )
+    # Write a yosys script file so paths with spaces are passed as a single
+    # argument to -s rather than embedded in the -p inline string (where yosys
+    # would split on spaces and misparse the path).
+    ys_path = os.path.join(out_dir, "echo_slave.ys")
+    with open(ys_path, "w") as f:
+        f.write(f'read_rtlil "{il_path}"\n')
+        f.write('hierarchy -check -top top\n')
+        f.write('proc; opt\n')
+        f.write('rename top echo_slave\n')
+        f.write(f'write_verilog "{v_path}"\n')
+
+    subprocess.run(["yosys", "-q", "-s", ys_path], check=True)
     print(f"[export] {v_path}")
     return v_path
 
@@ -98,22 +96,22 @@ _io = [
         IOStandard("LVCMOS33"),
     ),
 
-    # LAN8720 RMII on J40, Bank 6, LVCMOS33.
-    # LiteEth requires the clock pin in a separate "eth_clocks" record.
-    # When refclk_cd is set, LiteEth drives ref_clk via a DDR output cell
-    # to produce clean 50 MHz edges into the PHY's REFCLK input.
+    # LAN8720A RMII. REF_CLK is an INPUT: the PHY drives 50 MHz on J4
+    # (PL50A / GR_PCLK6_0 -- global-clock-capable). The FPGA receives this
+    # and uses it as cd_eth. refclk_cd=None in LiteEthPHYRMII prevents the
+    # FPGA from trying to drive it back out.
     ("eth_clocks", 0,
-        Subsignal("ref_clk", Pins("K2")),
+        Subsignal("ref_clk", Pins("J4")),
         IOStandard("LVCMOS33"),
     ),
     ("eth", 0,
-        Subsignal("tx_data", Pins("F1 H2")),
-        Subsignal("tx_en",   Pins("G1")),
-        Subsignal("rx_data", Pins("J4 J5")),
-        Subsignal("crs_dv",  Pins("J3")),
-        Subsignal("mdio",    Pins("K3")),
-        Subsignal("mdc",     Pins("L4")),
-        Subsignal("rst_n",   Pins("L5")),
+        Subsignal("tx_data", Pins("K2 M5")),
+        Subsignal("tx_en",   Pins("J5")),
+        Subsignal("rx_data", Pins("G1 N5")),
+        Subsignal("crs_dv",  Pins("L5")),
+        Subsignal("mdio",    Pins("L4")),
+        Subsignal("mdc",     Pins("K4")),
+        # rst_n omitted: nRST not wired; pulled high on breakout.
         IOStandard("LVCMOS33"),
     ),
 
@@ -138,14 +136,16 @@ class ECP5EvalPlatform(LatticePlatform):
             toolchain="trellis",
         )
 
-# 3. CRG: 12 MHz -> ECP5 PLL -> 50 MHz
-
-# Two clock domains are produced from one PLL output:
-#   cd_sys: CPU, bus interconnect, EchoSlave, MAC FIFOs.
-#   cd_eth: LiteEth RMII pads; also driven out on ref_clk so the LAN8720
-#           uses the same 50 MHz reference as the FPGA fabric.
-# Both domains run at exactly 50 MHz, so no clock-domain crossing is
-# needed between the MAC FIFO boundary and the rest of the SoC.
+# 3. CRG: 12 MHz -> ECP5 PLL -> 50 MHz (cd_sys)
+#         PHY REF_CLK on J4 -> cd_eth
+#
+# cd_sys: CPU, bus interconnect, EchoSlave, MAC FIFOs -- from local PLL.
+# cd_eth: LiteEth RMII TX/RX pads -- clocked by the PHY's 50 MHz REF_CLK
+#         output on J4 (GR_PCLK6_0). The two 50 MHz domains are asynchronous;
+#         LiteEthMAC's FIFOs handle the crossing.
+#
+# The CRG requests eth_clocks so the same pad record can be forwarded to
+# LiteEthPHYRMII without a second platform.request() call.
 
 from migen import *
 from litex.soc.cores.clock import ECP5PLL
@@ -160,12 +160,17 @@ class CRG(Module):
         self.clock_domains.cd_eth = ClockDomain()
 
         clk12 = platform.request("clk12")
+        self.eth_clocks = platform.request("eth_clocks")
 
         self.submodules.pll = pll = ECP5PLL()
         self.comb += pll.reset.eq(self.rst)
         pll.register_clkin(clk12, 12e6)
         pll.create_clkout(self.cd_sys, SYS_CLK_FREQ)
-        pll.create_clkout(self.cd_eth, 50e6)
+
+        # cd_eth is driven by the PHY's 50 MHz REF_CLK on J4 (GR_PCLK6_0).
+        # nextpnr-ecp5 routes PCLK-capable input pins through the global clock
+        # network automatically when the signal feeds a clock domain.
+        self.comb += self.cd_eth.clk.eq(self.eth_clocks.ref_clk)
 
 
 
@@ -242,11 +247,13 @@ class EchoSoC(SoCCore):
         # Clock and reset
         self.submodules.crg = CRG(platform)
 
-        # Ethernet PHY: RMII, LAN8720, 50 MHz driven out from cd_eth
+        # Ethernet PHY: RMII, LAN8720A.
+        # clock_pads is the pad already requested by CRG (avoids double-request).
+        # refclk_cd=None: PHY drives REF_CLK; FPGA does not generate it.
         self.submodules.ethphy = LiteEthPHYRMII(
-            clock_pads = platform.request("eth_clocks"),
+            clock_pads = self.crg.eth_clocks,
             pads       = platform.request("eth"),
-            refclk_cd  = "eth",
+            refclk_cd  = None,
         )
 
         # Ethernet MAC: CPU-driven wishbone interface.
@@ -258,7 +265,7 @@ class EchoSoC(SoCCore):
             phy               = self.ethphy,
             dw                = 32,
             interface         = "wishbone",
-            endianness        = "big",
+            endianness        = "little",
             with_preamble_crc = True,
         )
         # The region named "ethmac" generates ETHMAC_BASE in mem.h, which is
@@ -268,7 +275,6 @@ class EchoSoC(SoCCore):
                            SoCRegion(origin=MAC_BASE,          size=0x1000, cached=False))
         self.bus.add_slave("ethmac_tx", self.ethmac.bus_tx,
                            SoCRegion(origin=MAC_BASE + 0x1000, size=0x1000, cached=False))
-        self.add_csr("ethmac")
 
         # Echo BRAM: 512 words x 4 bytes at ECHO_BASE
         self.submodules.echoslave = EchoSlaveWrapper()
@@ -292,7 +298,6 @@ class EchoSoC(SoCCore):
         from litex.soc.cores.gpio import GPIOOut
         debug_sigs = Signal(4)
         self.submodules.debug_leds = GPIOOut(debug_sigs)
-        self.add_csr("debug_leds")
         for i in range(4):
             dled = platform.request("user_led", i + 1)
             self.comb += dled.eq(~debug_sigs[i])
@@ -304,7 +309,9 @@ class EchoSoC(SoCCore):
 
 if __name__ == "__main__":
     root = os.path.dirname(os.path.abspath(__file__))
-    build_dir    = os.path.join(root, "build")
+    # Build into /tmp to avoid spaces in the project path breaking make rules
+    # inside the LiteX libc Makefile (make splits on spaces in target names).
+    build_dir    = "/tmp/ecp5-soc-build"
     firmware_dir = os.path.join(root, "..", "firmware")
     firmware_rom = os.path.join(firmware_dir, "firmware_rom.bin")
 
@@ -314,13 +321,30 @@ if __name__ == "__main__":
     # Step 1: Generate CSR headers without running synthesis.
     # The firmware includes generated/csr.h, so the headers must exist and
     # reflect the current SoC (including debug_leds CSR) before make runs.
-    print("[headers] generating CSR headers ...")
+    print("[headers] generating CSR headers and building LiteX libraries ...")
     platform0 = ECP5EvalPlatform()
     platform0.add_source(v_path)
     soc0 = EchoSoC(platform0)
-    Builder(soc0, output_dir=build_dir,
-            compile_gateware=False, compile_software=False).build(
-        build_name="ecp5_ethernet_soc", run=False)
+    try:
+        Builder(soc0, output_dir=build_dir,
+                compile_gateware=False, compile_software=True).build(
+            build_name="ecp5_ethernet_soc", run=False)
+    except subprocess.CalledProcessError:
+        # The LiteX BIOS fails to link with with_uart=False (uart_read_nonblock
+        # is undefined). That's expected — we use custom firmware, not the BIOS.
+        # Abort only if the libraries our firmware actually needs are missing.
+        missing = [
+            lib for lib in [
+                "libc/libc.a",
+                "libcompiler_rt/libcompiler_rt.a",
+                "libbase/libbase.a",
+                "libliteeth/libliteeth.a",
+            ]
+            if not os.path.exists(os.path.join(build_dir, "software", lib))
+        ]
+        if missing:
+            raise RuntimeError(f"Required libraries not built: {missing}")
+        print("[libs] BIOS skipped (no UART); required libraries present.")
 
     # Step 2: Compile firmware with the freshly generated CSR headers.
     print("[firmware] compiling firmware_rom.bin ...")
@@ -337,4 +361,4 @@ if __name__ == "__main__":
     Builder(soc, output_dir=build_dir,
             compile_gateware=True, compile_software=False).build(
         build_name="ecp5_ethernet_soc")
-    print("[done] build/gateware/ecp5_ethernet_soc.bit")
+    print("[done] /tmp/ecp5-soc-build/gateware/ecp5_ethernet_soc.bit")

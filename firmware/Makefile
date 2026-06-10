@@ -5,14 +5,13 @@
 #   firmware.bin      -- SRAM firmware loaded via litex_term (legacy)
 #   clean             -- remove build artefacts
 
-BUILD_DIR    := ../soc/build
+BUILD_DIR    := /tmp/ecp5-soc-build
 GENERATED    := $(BUILD_DIR)/software/include/generated
-CONDA_PYTHON := /opt/anaconda3/bin/python3
-LITEX_SWDIR  := $(shell $(CONDA_PYTHON) -c \
-    "import litex, os; print(os.path.join(os.path.dirname(litex.__file__),'soc','software'))" 2>/dev/null \
-    || echo "/opt/anaconda3/lib/python3.12/site-packages/litex/soc/software")
 
 include $(GENERATED)/variables.mak
+
+# SOC_DIRECTORY is set by variables.mak; derive the software tree from it.
+LITEX_SWDIR  := $(SOC_DIRECTORY)/software
 
 CC      := $(TRIPLE)-gcc
 AS      := $(TRIPLE)-gcc
@@ -32,13 +31,16 @@ CFLAGS  += -DETHMAC_SLOT_SIZE=2048 -DETHMAC_RX_SLOTS=2 -DETHMAC_TX_SLOTS=2
 
 LIBS    := $(BUILD_DIR)/software/libliteeth/libliteeth.a \
            $(BUILD_DIR)/software/libbase/libbase.a \
-           $(BUILD_DIR)/software/libcompiler_rt/libcompiler_rt.a
+           $(BUILD_DIR)/software/libcompiler_rt/libcompiler_rt.a \
+           $(BUILD_DIR)/software/libc/libc.a
 
 # ---------------------------------------------------------------------------
 # ROM firmware: code lives at 0x00000000, runs directly from FPGA ROM.
 # This is the primary target -- baked into the bitstream by build_soc.py.
 # ---------------------------------------------------------------------------
-ROM_LDFLAGS := -nostartfiles -T rom.ld -Wl,--gc-sections
+# -nostdlib: suppress all toolchain default libraries (-lc, -lgloss, etc.).
+# The LiteX-built picolibc (libc.a above) is linked explicitly instead.
+ROM_LDFLAGS := -nostdlib -T rom.ld -Wl,--gc-sections
 
 all: firmware_rom.bin
 
