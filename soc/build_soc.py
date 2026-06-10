@@ -8,7 +8,7 @@ Steps:
   3. Runs yosys + nextpnr-ecp5 + ecppack and writes a bitstream.
 
 Board:  LFE5UM5G-85F-EVN  (device LFE5UM5G-85F-8BG381)
-PHY:    LAN8720A breakout (PHYAD0 pulled HIGH -> PHY address = 1)
+PHY:    LAN8720A breakout
 Clock:  12 MHz FTDI oscillator at A10 -> PLL -> 50 MHz cd_sys
         PHY drives 50 MHz REF_CLK on J4 (GR_PCLK6_0) -> cd_eth
 
@@ -250,7 +250,6 @@ class EchoSoC(SoCCore):
         # Ethernet PHY: RMII, LAN8720A.
         # clock_pads is the pad already requested by CRG (avoids double-request).
         # refclk_cd=None: PHY drives REF_CLK; FPGA does not generate it.
-        # phy_id=1: breakout ties PHYAD0 HIGH, so PHY address = 1 (not 0).
         self.submodules.ethphy = LiteEthPHYRMII(
             clock_pads = self.crg.eth_clocks,
             pads       = platform.request("eth"),
