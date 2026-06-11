@@ -5,6 +5,12 @@ soc/build/
 firmware/*.o
 firmware/*.elf
 firmware/*.bin
+firmware-tcp/*.o
+firmware-tcp/*.elf
+firmware-tcp/*.bin
+
+# Upstream lwIP source tree (cloned, not vendored)
+firmware-tcp/lwip/
 
 # Python
 __pycache__/

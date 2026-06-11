@@ -12,7 +12,8 @@ This is the prototype node for a 10-node cloud FPGA cluster.
 soc/
   echo_slave.py        Amaranth HDL Wishbone slave -- 512 x 32-bit BRAM
   test_echo_slave.py   Simulation testbench for EchoSlave
-  build_soc.py         Full build script: Amaranth -> Verilog -> LiteX SoC -> bitstream
+  build_soc.py         Full build script: Amaranth -> Verilog -> LiteX SoC -> bitstream (UDP)
+  build_soc_tcp.py     Same build flow for the TCP variant (lwIP firmware baked into ROM)
 
 firmware/
   echo.c               Bare-metal VexRiscv C firmware (UDP echo loop)
@@ -20,8 +21,19 @@ firmware/
   rom.ld               Linker script: code in ROM at 0x00000000, data in SRAM at 0x10000000
   Makefile             Cross-compiles firmware_rom.bin (baked into bitstream)
 
+firmware-tcp/
+  echo_tcp.c           TCP echo server on port 1234, built on lwIP (NO_SYS=1, polling)
+  ethernetif.c         lwIP netif driver for the LiteEth MAC DMA slots
+  sys_arch.c           lwIP platform glue: sys_now() from timer0, rand(), memcmp()
+  lwipopts.h           lwIP configuration tuned for 16 KB SRAM
+  lwip/                lwIP source tree (git clone, not vendored)
+  arch/                lwIP cc.h / sys_arch.h for bare-metal RISC-V
+  crt0.S, rom.ld       Startup and linker script (rom.ld also claims .sdata/.sbss)
+  Makefile             Cross-compiles firmware_rom.bin with the lwIP core
+
 host/
   measure.py           Sends UDP packets of increasing size, measures RTT and Mbps, plots results
+  measure_tcp.py       Same sweep over a single TCP connection, plots to host/latency_tcp.png
 ```
 
 ---
@@ -309,6 +321,49 @@ Sending to 192.168.1.101:1234
 ```
 
 The Mbps column is `payload_bytes * 8 / mean_RTT` — effective one-way throughput. The ~600 µs latency floor is dominated by the USB adapter polling interval, not the FPGA. The 1400-byte spike is a known USB adapter behavior near the full Ethernet frame size.
+
+---
+
+## TCP Variant
+
+The TCP variant replaces `libliteeth` with [lwIP](https://savannah.nongnu.org/projects/lwip/) running bare-metal (`NO_SYS=1`, polled main loop). The firmware listens on TCP port 1234 and echoes every byte back through the EchoSlave BRAM, same as the UDP version. Network setup (Steps 1–6 above) is identical.
+
+### 1. Build
+
+```sh
+conda activate litex-ecp5
+cd soc && python build_soc_tcp.py
+```
+
+Same four-step flow as the UDP build. Output: `/tmp/ecp5-soc-build-tcp/gateware/ecp5_ethernet_soc.bit`
+
+### 2. Program the FPGA
+
+```sh
+openFPGALoader -b ecpix5 /tmp/ecp5-soc-build-tcp/gateware/ecp5_ethernet_soc.bit
+```
+
+### 3. Verify boot via LEDs
+
+During init the firmware writes a progress code to D6–D9 (D6 = bit 0 ... D9 = bit 3). The healthy idle state after boot is code `0x0A`: **D7 and D9 on, D6 and D8 off**. If the LEDs freeze at another code, the firmware died at that init step (see the numbered `debug_leds_out_write` calls in `firmware-tcp/echo_tcp.c`).
+
+Once traffic flows, the LEDs show the most recent network event instead (e.g. `0x0B` = frame transmitted), so any pattern with D5 blinking and ping answering is fine.
+
+### 4. Test
+
+```sh
+ping 192.168.1.101                                # ARP + ICMP via lwIP
+printf 'hello fpga\n' | nc -w 2 192.168.1.101 1234  # TCP echo
+```
+
+### 5. Measure latency
+
+```sh
+conda activate litex-ecp5
+python host/measure_tcp.py
+```
+
+This opens one TCP connection, sweeps payload sizes from 8 to 1400 bytes (20 round-trips each), prints a latency/throughput table, and saves a plot to `host/latency_tcp.png`.
 
 ---
 
