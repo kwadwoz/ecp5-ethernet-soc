@@ -8,9 +8,11 @@ firmware/*.bin
 firmware-tcp/*.o
 firmware-tcp/*.elf
 firmware-tcp/*.bin
+firmware-tcp/lwip/src/**/*.o
 
-# Upstream lwIP source tree (cloned, not vendored)
-firmware-tcp/lwip/
+# lwIP extras not needed for the build (src/ itself is vendored)
+firmware-tcp/lwip/doc/
+firmware-tcp/lwip/pax_global_header
 
 # Python
 __pycache__/
