@@ -50,27 +50,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # as a platform source before LiteX invokes synthesis so yosys picks it
 # up during the full SoC build.
 
-def export_echo_slave(out_dir):
+def export_sat_slave(out_dir):
     from amaranth.back.rtlil import convert
-    from echo_slave import EchoSlave
+    from sat_slave import SATSlave
 
     os.makedirs(out_dir, exist_ok=True)
-    il_path = os.path.join(out_dir, "echo_slave.il")
-    v_path  = os.path.join(out_dir, "echo_slave.v")
+    il_path = os.path.join(out_dir, "sat_slave.il")
+    v_path  = os.path.join(out_dir, "sat_slave.v")
 
-    dut = EchoSlave()
+    dut = SATSlave()
     with open(il_path, "w") as f:
         f.write(convert(dut, ports=dut.ports()))
 
-    # Write a yosys script file so paths with spaces are passed as a single
-    # argument to -s rather than embedded in the -p inline string (where yosys
-    # would split on spaces and misparse the path).
-    ys_path = os.path.join(out_dir, "echo_slave.ys")
+    ys_path = os.path.join(out_dir, "sat_slave.ys")
     with open(ys_path, "w") as f:
         f.write(f'read_rtlil "{il_path}"\n')
         f.write('hierarchy -check -top top\n')
         f.write('proc; opt\n')
-        f.write('rename top echo_slave\n')
+        f.write('rename top sat_slave\n')
         f.write(f'write_verilog "{v_path}"\n')
 
     subprocess.run(["yosys", "-q", "-s", ys_path], check=True)
@@ -174,22 +171,22 @@ class CRG(Module):
 
 
 
-# 4. EchoSlave Wishbone wrapper
-# Thin Migen shim around the Amaranth-generated echo_slave.v.
+# 4. SATSlave Wishbone wrapper
+# Thin Migen shim around the Amaranth-generated sat_slave.v.
 # Amaranth makes every clock domain explicit in the RTLIL it emits, so
 # the generated Verilog has "clk" and "rst" as top-level input ports.
 # These are tied to cd_sys so the slave runs in the main SoC clock domain.
-# The 9-bit address bus covers words 0..511 (the full 512-word BRAM depth).
+# The 9-bit address bus covers words 0..511; SAT registers occupy 0..207.
 
 from litex.soc.interconnect import wishbone
 
 
-class EchoSlaveWrapper(Module):
+class SATSlaveWrapper(Module):
     def __init__(self):
         self.bus = bus = wishbone.Interface(data_width=32, adr_width=9)
 
         self.specials += Instance(
-            "echo_slave",
+            "sat_slave",
             i_clk      = ClockSignal("sys"),
             i_rst      = ResetSignal("sys"),
             i_wb_cyc   = bus.cyc,
@@ -276,9 +273,9 @@ class EchoSoC(SoCCore):
         self.bus.add_slave("ethmac_tx", self.ethmac.bus_tx,
                            SoCRegion(origin=MAC_BASE + 0x1000, size=0x1000, cached=False))
 
-        # Echo BRAM: 512 words x 4 bytes at ECHO_BASE
-        self.submodules.echoslave = EchoSlaveWrapper()
-        self.bus.add_slave("echoslave", self.echoslave.bus,
+        # SAT slave: register file at ECHO_BASE (same address as the old echo BRAM)
+        self.submodules.satslave = SATSlaveWrapper()
+        self.bus.add_slave("satslave", self.satslave.bus,
                            SoCRegion(origin=ECHO_BASE, size=0x800, cached=False))
 
         # Heartbeat: LED 0 blinks at ~1.5 Hz to confirm the SoC is running.
@@ -315,8 +312,8 @@ if __name__ == "__main__":
     firmware_dir = os.path.join(root, "..", "firmware-tcp")
     firmware_rom = os.path.join(firmware_dir, "firmware_rom.bin")
 
-    # Step 0: Export EchoSlave Verilog (needed by both passes).
-    v_path = export_echo_slave(os.path.join(build_dir, "gateware"))
+    # Step 0: Export SATSlave Verilog (needed by both passes).
+    v_path = export_sat_slave(os.path.join(build_dir, "gateware"))
 
     # Step 1: Generate CSR headers without running synthesis.
     # The firmware includes generated/csr.h, so the headers must exist and

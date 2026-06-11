@@ -65,7 +65,7 @@ LWIP_CORE_OBJS := \
     $(LWIP_SRC)/core/ipv4/ip4_frag.o \
     $(LWIP_SRC)/netif/ethernet.o
 
-APP_OBJS := echo_tcp.o ethernetif.o sys_arch.o crt0.o
+APP_OBJS := sat_tcp.o ethernetif.o sys_arch.o crt0.o
 
 ALL_OBJS := $(APP_OBJS) $(LWIP_CORE_OBJS)
 
@@ -95,7 +95,7 @@ firmware_rom.elf: $(ALL_OBJS) $(LIBS)
 crt0.o: crt0.S
 	$(AS) $(CFLAGS) -c -o $@ $<
 
-echo_tcp.o: echo_tcp.c
+sat_tcp.o: sat_tcp.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 ethernetif.o: ethernetif.c
@@ -111,5 +111,7 @@ $(LWIP_SRC)/%.o: $(LWIP_SRC)/%.c
 # ---------------------------------------------------------------------------
 clean:
 	rm -f *.o *.elf *.bin $(LWIP_CORE_OBJS)
+	@# Remove any leftover echo_tcp.o from previous builds
+	rm -f echo_tcp.o
 
 .PHONY: all clean
