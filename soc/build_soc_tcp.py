@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-build_soc.py -- ECP5 Evaluation Board Ethernet Echo SoC
+build_soc_tcp.py -- ECP5 Evaluation Board Ethernet SAT Solver SoC
 
 Steps:
-  1. Exports EchoSlave (Amaranth HDL) to Verilog via yosys.
-  2. Defines a LiteX SoC: VexRiscv + LiteEth RMII + EchoSlave Wishbone slave.
+  1. Exports SATSlave (Amaranth HDL) to Verilog via yosys.
+  2. Defines a LiteX SoC: VexRiscv + LiteEth RMII + SATSlave Wishbone slave.
   3. Runs yosys + nextpnr-ecp5 + ecppack and writes a bitstream.
 
 Board:  LFE5UM5G-85F-EVN  (device LFE5UM5G-85F-8BG381)
@@ -42,11 +42,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 
-# 1. Export EchoSlave to Verilog
+# 1. Export SATSlave to Verilog
 
 # Amaranth converts the design to RTLIL (its internal representation).
 # Yosys reads that IR, optimises it, renames the top module from "top"
-# to "echo_slave", and writes synthesisable Verilog. The file is added
+# to "sat_slave", and writes synthesisable Verilog. The file is added
 # as a platform source before LiteX invokes synthesis so yosys picks it
 # up during the full SoC build.
 
@@ -136,7 +136,7 @@ class ECP5EvalPlatform(LatticePlatform):
 # 3. CRG: 12 MHz -> ECP5 PLL -> 50 MHz (cd_sys)
 #         PHY REF_CLK on J4 -> cd_eth
 #
-# cd_sys: CPU, bus interconnect, EchoSlave, MAC FIFOs -- from local PLL.
+# cd_sys: CPU, bus interconnect, SATSlave, MAC FIFOs -- from local PLL.
 # cd_eth: LiteEth RMII TX/RX pads -- clocked by the PHY's 50 MHz REF_CLK
 #         output on J4 (GR_PCLK6_0). The two 50 MHz domains are asynchronous;
 #         LiteEthMAC's FIFOs handle the crossing.
@@ -204,14 +204,13 @@ class SATSlaveWrapper(Module):
 # 5. SoC
 
 # Memory map:
-#   0x00000000  ROM       32 KB  boot firmware (integrated BRAM)
+#   0x00000000  ROM       64 KB  boot firmware (integrated BRAM)
 #   0x10000000  SRAM      16 KB  stack and heap (integrated BRAM)
-#   0x90000000  EchoSlave  2 KB  512 x 32-bit echo BRAM
+#   0x90000000  SATSlave   2 KB  SAT solver register file
 #   0xB0000000  LiteEth    8 KB  MAC TX + RX SRAMs (wishbone slave)
 #
-# The firmware uses the LiteEth MAC wishbone slave to read received frames
-# from the RX SRAM, copy payload words into EchoSlave via the echo address,
-# read them back, write to the TX SRAM, then trigger transmit.
+# The firmware (sat_tcp.c, via lwIP) parses SAT formulas from TCP, loads
+# the SATSlave registers, polls the done bit, and replies with the result.
 
 from litex.soc.integration.soc_core import SoCCore
 from litex.soc.integration.soc import SoCRegion
@@ -220,11 +219,11 @@ from litex.soc.integration.common import get_mem_data
 from liteeth.phy.rmii import LiteEthPHYRMII
 from liteeth.mac import LiteEthMAC
 
-ECHO_BASE = 0x90000000
-MAC_BASE  = 0xB0000000   # RX at +0x0000, TX at +0x1000
+SAT_BASE = 0x90000000
+MAC_BASE = 0xB0000000   # RX at +0x0000, TX at +0x1000
 
 
-class EchoSoC(SoCCore):
+class SATSoC(SoCCore):
     def __init__(self, platform, rom_init=[]):
         SoCCore.__init__(
             self,
@@ -235,7 +234,7 @@ class EchoSoC(SoCCore):
             integrated_rom_size  = 0x10000,   # 64 KB -- holds firmware_rom.bin
             integrated_rom_init  = rom_init,   # firmware baked in at build time
             integrated_sram_size = 0x4000,
-            ident                = "ECP5 Ethernet Echo SoC",
+            ident                = "ECP5 Ethernet SAT Solver SoC",
             ident_version        = True,
             with_uart            = False,
             with_ctrl            = False,
@@ -273,10 +272,10 @@ class EchoSoC(SoCCore):
         self.bus.add_slave("ethmac_tx", self.ethmac.bus_tx,
                            SoCRegion(origin=MAC_BASE + 0x1000, size=0x1000, cached=False))
 
-        # SAT slave: register file at ECHO_BASE (same address as the old echo BRAM)
+        # SAT slave: register file (same address the echo BRAM used to occupy)
         self.submodules.satslave = SATSlaveWrapper()
         self.bus.add_slave("satslave", self.satslave.bus,
-                           SoCRegion(origin=ECHO_BASE, size=0x800, cached=False))
+                           SoCRegion(origin=SAT_BASE, size=0x800, cached=False))
 
         # Heartbeat: LED 0 blinks at ~1.5 Hz to confirm the SoC is running.
         # LED is active low, so ctr[25] = 0 means ON, 1 means OFF.
@@ -321,7 +320,7 @@ if __name__ == "__main__":
     print("[headers] generating CSR headers and building LiteX libraries ...")
     platform0 = ECP5EvalPlatform()
     platform0.add_source(v_path)
-    soc0 = EchoSoC(platform0)
+    soc0 = SATSoC(platform0)
     try:
         Builder(soc0, output_dir=build_dir,
                 compile_gateware=False, compile_software=True).build(
@@ -353,7 +352,7 @@ if __name__ == "__main__":
     # Step 4: Build full gateware with firmware baked in.
     platform = ECP5EvalPlatform()
     platform.add_source(v_path)
-    soc = EchoSoC(platform, rom_init=rom_init)
+    soc = SATSoC(platform, rom_init=rom_init)
     Builder(soc, output_dir=build_dir,
             compile_gateware=True, compile_software=False).build(
         build_name="ecp5_ethernet_soc")
